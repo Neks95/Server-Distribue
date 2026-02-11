@@ -1,0 +1,145 @@
+# TODO - Système de Stockage Distribué (Master-Slave)
+
+## NEKENA - ServerSocket (Master Server)
+
+### Priorité 1 : Base
+- [ ] Créer ServerSocket principal (port 8080)
+- [ ] Accepter connexions multiples (clients + slaves)
+- [ ] Différencier type de connexion (CLIENT vs SLAVE)
+- [ ] Définir protocole communication (format JSON)
+
+### Priorité 2 : Gestion Slaves
+- [ ] Enregistrer slaves (IP, port, ID)
+- [ ] Vérifier statut slaves (heartbeat)
+- [ ] Maintenir liste slaves actifs/inactifs
+
+### Priorité 3 : Traitement Fichiers
+- [ ] Réceptionner fichiers clients
+- [ ] Découper en fragments (ex: 1MB)
+- [ ] Distribuer fragments aux slaves
+- [ ] Implémenter algorithme distribution (round-robin)
+
+### Priorité 4 : Métadonnées
+- [ ] Créer structure métadonnées (nom, taille, fragments, mapping fragment->slave, checksum)
+- [ ] Sauvegarder métadonnées (fichier JSON)
+- [ ] Charger métadonnées au démarrage
+
+### Priorité 5 : Téléchargement
+- [ ] Recevoir requête download client
+- [ ] Récupérer fragments depuis slaves
+- [ ] Reconstituer fichier complet
+- [ ] Envoyer au client
+
+---
+
+## MISAINA - ClientSocket + Interface
+
+### Priorité 1 : Socket Client
+- [ ] Connexion Socket vers Master
+- [ ] Implémenter protocole communication
+- [ ] Envoyer requêtes (UPLOAD, DOWNLOAD, LIST)
+
+### Priorité 2 : Upload
+- [ ] Sélectionner fichier (JFileChooser)
+- [ ] Lire et envoyer au Master
+- [ ] Afficher progression (ProgressBar)
+- [ ] Gérer erreurs réseau
+
+### Priorité 3 : Download
+- [ ] Demander liste fichiers disponibles
+- [ ] Sélectionner fichier à télécharger
+- [ ] Recevoir et sauvegarder localement
+- [ ] Afficher progression
+
+### Priorité 4 : Interface Graphique
+- [ ] Fenêtre principale
+- [ ] Panneau Upload (bouton choisir, bouton upload, barre progression)
+- [ ] Panneau Download (liste fichiers, bouton télécharger, barre progression)
+- [ ] Zone logs/messages
+
+### Priorité 5 : Tests
+- [ ] Tester upload fichiers petits et gros
+- [ ] Tester download avec slaves multiples
+
+---
+
+## RYAN - SlaveSocket
+
+### Priorité 1 : Connexion Master
+- [ ] Créer Socket client vers Master
+- [ ] S'enregistrer (envoyer ID, capacité)
+- [ ] Écouter commandes Master
+
+### Priorité 2 : Réception Fragments
+- [ ] Recevoir fragments du Master
+- [ ] Stocker localement (/slave_storage/)
+- [ ] Nommer : {file_id}_fragment_{N}.dat
+- [ ] Confirmer réception (ACK)
+
+### Priorité 3 : Envoi Fragments
+- [ ] Recevoir requête GET_FRAGMENT
+- [ ] Lire fragment depuis disque
+- [ ] Envoyer au Master
+- [ ] Gérer erreurs (fragment manquant)
+
+### Priorité 4 : Gestion Locale
+- [ ] Créer index local fragments
+- [ ] Calculer espace disque disponible
+- [ ] Envoyer statut au Master
+
+### Priorité 5 : Heartbeat
+- [ ] Envoyer signal "alive" périodiquement (10s)
+- [ ] Répondre aux pings Master
+
+### Priorité 6 : Tests
+- [ ] Tester stockage multiples fragments
+- [ ] Simuler déconnexion/reconnexion
+- [ ] Lancer plusieurs instances slaves (ports différents)
+
+---
+
+## ENSEMBLE - Intégration
+
+### Phase 1 : Protocole
+- [ ] Définir format messages JSON :
+  ```json
+  {"type": "UPLOAD|DOWNLOAD|REGISTER_SLAVE|...", "data": {...}}
+  ```
+- [ ] Documenter tous types de messages
+
+### Phase 2 : Multithreading
+- [ ] Nekena : ExecutorService pour connexions
+- [ ] Misaina : Thread séparé UI vs réseau
+- [ ] Ryan : Thread pool pour I/O
+- [ ] Synchronisation ressources partagées
+
+### Phase 3 : Réplication
+- [ ] Définir facteur réplication (ex: 2)
+- [ ] Nekena : Distribuer fragment à N slaves
+- [ ] Ryan : Accepter duplicata
+- [ ] Nekena : Utiliser réplica si slave down
+
+### Phase 4 : Tests Intégration
+- [ ] Scénario complet Upload -> Stockage -> Download
+- [ ] Tester avec 1, 2, 3+ slaves
+- [ ] Simuler panne slave
+- [ ] Tester uploads/downloads simultanés
+
+
+## Communication Entre Modules
+
+### Client -> Master
+- UPLOAD {filename, size}
+- DOWNLOAD {filename}
+- LIST
+
+### Master -> Slave
+- STORE_FRAGMENT {file_id, fragment_id, data}
+- GET_FRAGMENT {file_id, fragment_id}
+- PING
+
+### Slave -> Master
+- REGISTER {slave_id, capacity}
+- ACK {fragment_id}
+- PONG
+- STATUS {free_space, fragments_count}
