@@ -3,10 +3,10 @@
 ## NEKENA - ServerSocket (Master Server)
 
 ### Priorité 1 : Base
-- [ ] Créer ServerSocket principal (port 8080)
-- [ ] Accepter connexions multiples (clients + slaves)
-- [ ] Différencier type de connexion (CLIENT vs SLAVE)
-- [ ] Définir protocole communication (format JSON)
+- [ ] Créer ServerSocket principal (port 5000) (ok)
+- [ ] Accepter connexions multiples (clients + slaves) (ok)
+- [ ] Différencier type de connexion (CLIENT vs SLAVE) (ok)
+- [ ] Définir protocole communication (format JSON csv pour le stockage)  (ok)
 
 ### Priorité 2 : Gestion Slaves
 - [ ] Enregistrer slaves (IP, port, ID)
