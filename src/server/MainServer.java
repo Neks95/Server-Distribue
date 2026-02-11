@@ -70,6 +70,8 @@ public class MainServer {
             }
         }
         writeToFile(slaveInfo);
+        slaves.add(slaveInfo);
+
     }
 
     public static void writeToFile(SlaveInfo slaveInfo) throws IOException {
