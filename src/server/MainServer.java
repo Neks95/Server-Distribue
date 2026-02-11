@@ -131,8 +131,7 @@ public class MainServer {
 
         System.out.println("\nEnvoi fragment au Slave " + slave.getId());
 
-        // TODO: Récupérer IP et port du slave depuis SlaveInfo
-        String slaveIp = "localhost"; 
+        String slaveIp = "localhost";
         int slavePort = 6000 + slave.getId();  // Exemple : Slave #1 → port 6001
 
         try (Socket slaveSocket = new Socket(slaveIp, slavePort);
