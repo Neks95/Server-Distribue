@@ -58,9 +58,8 @@ public class MainServer {
                 t.setName("c-thread");
                 t.setDaemon(false);
                 t.start();
-                ListenPingPong();
             }
-        } catch (InterruptedException e) {
+        } catch (Exception e) {
             throw new RuntimeException(e);
         }
     }

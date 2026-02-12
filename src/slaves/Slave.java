@@ -300,18 +300,4 @@ public class Slave {
         }
     }
 
-    // MAIN
-    public static void main(String[] args) {
-        try {
-            String slaveId = args[0];
-            String masterHost = args[1];
-            int masterPort = Integer.parseInt(args[2]);
-            int listenPort = Integer.parseInt(args[3]);
-            String storageDir = args.length >= 5 ? args[4] : "./slave_storage";
-            Slave s = new Slave(slaveId, masterHost, masterPort, listenPort, storageDir);
-            s.start();
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
 }
