@@ -16,7 +16,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 
-public class Slave {
+public class SlaveServer {
 
     private final String slaveId;
     private final String masterHost;
@@ -27,12 +27,12 @@ public class Slave {
     private final Gson gson = new Gson();
     private final ExecutorService pool = Executors.newFixedThreadPool(8);
 
-    public Slave(String slaveId, String masterHost, int masterPort, int listenPort, String storageDirPath) throws IOException {
+    public SlaveServer(String slaveId, String masterHost, int masterPort, int listenPort, String storageDirPath) throws IOException {
         this.slaveId = slaveId;
         this.masterHost = masterHost;
         this.masterPort = masterPort;
         this.listenPort = listenPort;
-        this.storageDir = Paths.get(storageDirPath == null ? "./slave-storage" : storageDirPath);
+        this.storageDir = Paths.get(storageDirPath == null ? "./slave_storage" : storageDirPath);
         Files.createDirectories(this.storageDir);
         loadIndexFromStorage();
     }
@@ -48,7 +48,6 @@ public class Slave {
             registerWithMaster();
         } catch (Exception e) {
             System.err.println("Impossible d'enregistrer auprès du master: " + e.getMessage());
-            
         }
 
         try (ServerSocket serverSocket = new ServerSocket(listenPort)) {
@@ -63,7 +62,6 @@ public class Slave {
             pool.shutdown();
         }
     }
-
 
     private void registerWithMaster() {
         try (Socket s = new Socket(masterHost, masterPort);
@@ -142,7 +140,6 @@ public class Slave {
         return baos.toString(StandardCharsets.UTF_8.name()).trim();
     }
 
-    
     private void handleStoreFragment(InputStream in, OutputStream out, JsonObject data) throws IOException {
         if (data == null || !data.has("file_id") || !data.has("fragment_id") || !data.has("length")) {
             sendJson(out, ackError(-1, "missing fields"));
@@ -152,7 +149,7 @@ public class Slave {
         int fragmentId = data.get("fragment_id").getAsInt();
         long length = data.get("length").getAsLong();
 
-        if (length < 0 || length > 500L * 1024L * 1024L) { 
+        if (length < 0 || length > 500L * 1024L * 1024L) { // limit 500MB example
             sendJson(out, ackError(fragmentId, "invalid length"));
             return;
         }
@@ -255,7 +252,6 @@ public class Slave {
         JsonObject wrapper = new JsonObject();
         wrapper.addProperty("type", "ACK");
         wrapper.add("data", d);
-       
         return d;
     }
 
@@ -311,8 +307,8 @@ public class Slave {
             String masterHost = args[1];
             int masterPort = Integer.parseInt(args[2]);
             int listenPort = Integer.parseInt(args[3]);
-            String storageDir = args.length >= 5 ? args[4] : "./slave-storage";
-            Slave s = new Slave(slaveId, masterHost, masterPort, listenPort, storageDir);
+            String storageDir = args.length >= 5 ? args[4] : "./slave_storage";
+            SlaveServer s = new SlaveServer(slaveId, masterHost, masterPort, listenPort, storageDir);
             s.start();
         } catch (Exception e) {
             e.printStackTrace();
