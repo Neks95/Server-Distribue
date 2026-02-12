@@ -23,6 +23,7 @@ public class Slave {
     private final int masterPort;
     private volatile boolean running = true;
 
+
     private Socket socket;
     private PrintWriter out;
     private BufferedReader in;
@@ -64,7 +65,7 @@ public class Slave {
                 socket = new Socket(masterHost, masterPort);
                 out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true);
                 in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
-                System.out.println("Connecté au " + masterHost + ":" + masterPort);
+                System.out.println("Connecte au " + masterHost + ":" + masterPort);
                 sendRegister();
                 listenLoop(); 
             } catch (Exception e) {

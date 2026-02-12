@@ -76,6 +76,8 @@ public class MainServer {
             long fileSize = in.readLong();
 
 
+
+
             //otran'servlet
             String fileId = UUID.randomUUID().toString();
             int fragmentCount = (int) Math.ceil((double) fileSize / fragment_SIZE);
@@ -85,7 +87,7 @@ public class MainServer {
             out.writeUTF("READY");
             out.flush();
 
-            System.out.println(" Réception du fichier...");
+            System.out.println(" Reception du fichier...");
 
             for (int i = 0; i < fragmentCount; i++) {
                 int currfragmentSize = (int) Math.min(fragment_SIZE, fileSize - (i * fragment_SIZE));
@@ -155,23 +157,23 @@ public class MainServer {
             textOut.println(gson.toJson(msg));
             textOut.flush();
 
-            System.out.println("📤 Commande envoyée");
+            System.out.println("Commande envoyée");
 
             // 2. Attendre READY du slave
             String readyLine = textIn.readLine();
 
             if (readyLine == null || !readyLine.contains("\"type\":\"READY\"")) {
-                System.err.println("❌ Slave pas prêt : " + readyLine);
+                System.err.println("Slave pas prêt : " + readyLine);
                 return;
             }
 
-            System.out.println("✅ Slave prêt");
+            System.out.println("Slave prêt");
 
             // 3. Envoyer les données BINAIRES
             binaryOut.write(fragmentData);
             binaryOut.flush();
 
-            System.out.println("📤 Données envoyées : " + fragmentData.length + " bytes");
+            System.out.println("Donnees envoyees : " + fragmentData.length + " bytes");
 
             // 4. Attendre ACK du slave
             String ackLine = textIn.readLine();
@@ -184,18 +186,18 @@ public class MainServer {
                 String checksum = ackData.has("checksum") ?
                         ackData.get("checksum").getAsString() : "N/A";
 
-                System.out.println("✅ ACK reçu : " + status);
-                System.out.println("🔐 Checksum : " + checksum);
+                System.out.println("ACK reçu : " + status);
+                System.out.println("Checksum : " + checksum);
 
                 // TODO: Sauvegarder checksum dans métadonnées
 
             } else {
-                System.err.println("❌ Erreur slave : " + status);
+                System.err.println("Erreur slave : " + status);
             }
 
         } catch (Exception e) {
-            System.err.println("❌ Erreur connexion slave : " + e.getMessage());
-            throw new IOException("Échec envoi fragment au slave", e);
+            System.err.println("Erreur connexion slave : " + e.getMessage());
+            throw new IOException("Echec envoi fragment au slave", e);
         }
     }
 
@@ -251,6 +253,7 @@ public class MainServer {
             throw new RuntimeException(e);
         }
     }
+
 
 
 
