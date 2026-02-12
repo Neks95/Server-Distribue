@@ -6,24 +6,44 @@ import com.google.gson.JsonObject;
 import slaves.Slave;
 
 import java.io.*;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+
+import static java.lang.Thread.sleep;
 
 
 public class MainServer {
     private static final int PORT = 5000;
     private static final int fragment_SIZE = 1024 * 1024;
     private static final Gson gson = new Gson();
-
     private static List<SlaveInfo> slaves = new ArrayList<>();
 
     public static void main(String[] args) throws IOException {
         System.out.println("demmarage du serveur sur le port " + PORT);
         System.out.println("Chargement des slaves ....");
         loadSlaveFromFile();
+        System.out.println(slaves.size() + " slave(s) enregistré(s)");
+
+        Thread listen_ping_pong = new Thread(() -> {
+            while (true) {
+                try {
+                    Thread.sleep(10000);
+                    System.out.println("\n Verification des slaves...");
+                    sendPing();
+                } catch (InterruptedException e) {
+                    System.err.println("Heartbeat interrompu");
+                    break;
+                }
+            }
+        });
+        listen_ping_pong.setName("ping_pong-thread");
+        listen_ping_pong.setDaemon(true);
+        listen_ping_pong.start();
         try (ServerSocket serverSocket = new ServerSocket(PORT)) {
             while (true) {
                 Socket client = serverSocket.accept();
@@ -38,8 +58,62 @@ public class MainServer {
                 t.setName("c-thread");
                 t.setDaemon(false);
                 t.start();
+                ListenPingPong();
+            }
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public static void sendPing() {
+        for(SlaveInfo slave : slaves){
+            try (Socket socket = new Socket(slave.getHost(), slave.getPort());
+                 OutputStream out = socket.getOutputStream();
+                 InputStream in = socket.getInputStream()) {
+
+                JsonObject msg = new JsonObject();
+                msg.addProperty("type", "PING");
+
+                String jsonString = gson.toJson(msg) + "\n";
+                out.write(jsonString.getBytes(StandardCharsets.UTF_8));
+                out.flush();
+
+                System.out.println("PING envoye à Slave #" + slave.getId());
+
+                String response = readJsonLine(in);
+                if (response == null) {
+                    System.err.println(" Slave #" + slave.getId() + " ne repond pas");
+                    slave.setActif(false);
+                }
+
+                JsonObject pongMsg = gson.fromJson(response, JsonObject.class);
+
+                if (pongMsg.has("type") && "PONG".equals(pongMsg.get("type").getAsString())) {
+                    System.out.println("PONG reçu de Slave #" + slave.getId());
+                    slave.setActif(true);
+                } else {
+                    slave.setActif(false);
+                    System.err.println("Reponse invalide du Slave #" + slave.getId());
+                }
+            } catch (IOException e) {
+                slave.setActif(false);
+                System.err.println("Slave #" + slave.getId() + " inaccessible: " + e.getMessage());
             }
         }
+    }
+
+    private static String readJsonLine(InputStream in) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        int b;
+        while ((b = in.read()) != -1) {
+            if (b == '\n') break;
+            baos.write(b);
+            if (baos.size() > 10_000) {
+                throw new IOException("Ligne JSON trop longue");
+            }
+        }
+        if (baos.size() == 0 && b == -1) return null;
+        return baos.toString(StandardCharsets.UTF_8.name()).trim();
     }
 
     public static void handle(Socket client) throws IOException {
@@ -74,9 +148,6 @@ public class MainServer {
         try (DataInputStream in = new DataInputStream(client.getInputStream()); DataOutputStream out = new DataOutputStream(client.getOutputStream())) {
             String fileName = in.readUTF();
             long fileSize = in.readLong();
-
-
-
 
             //otran'servlet
             String fileId = UUID.randomUUID().toString();
@@ -126,106 +197,99 @@ public class MainServer {
             e.printStackTrace();
         }
     }
-    
+
     private static void sendfragmentToSlave(SlaveInfo slave, String fileId,
-                                         int fragmentIndex, byte[] fragmentData)
+                                            int fragmentIndex, byte[] fragmentData)
             throws IOException {
 
-        System.out.println("\nEnvoi fragment au Slave " + slave.getId());
+        System.out.println("\n Envoi fragment #" + fragmentIndex + " au Slave #" + slave.getId());
 
-        String slaveIp = "localhost";
-        int slavePort = 6000 + slave.getId();  // Exemple : Slave #1 → port 6001
+        try (Socket slaveSocket = new Socket(slave.getHost(), slave.getPort());
+             OutputStream rawOut = slaveSocket.getOutputStream();
+             InputStream rawIn = slaveSocket.getInputStream()) {
 
-        try (Socket slaveSocket = new Socket(slaveIp, slavePort);
-             PrintWriter textOut = new PrintWriter(slaveSocket.getOutputStream(), true);
-             DataOutputStream binaryOut = new DataOutputStream(slaveSocket.getOutputStream());
-             BufferedReader textIn = new BufferedReader(
-                     new InputStreamReader(slaveSocket.getInputStream())
-             )) {
-
-            // 1. Envoyer commande JSON (métadonnées)
             JsonObject msg = new JsonObject();
             msg.addProperty("type", "STORE_FRAGMENT");
 
             JsonObject data = new JsonObject();
             data.addProperty("file_id", fileId);
             data.addProperty("fragment_id", fragmentIndex);
-            data.addProperty("size", fragmentData.length);
+            data.addProperty("length", fragmentData.length);
 
             msg.add("data", data);
 
-            textOut.println(gson.toJson(msg));
-            textOut.flush();
+            String jsonLine = gson.toJson(msg) + "\n";
+            rawOut.write(jsonLine.getBytes(StandardCharsets.UTF_8));
+            rawOut.flush();
 
-            System.out.println("Commande envoyée");
+            System.out.println("  Commande envoyee");
 
-            // 2. Attendre READY du slave
-            String readyLine = textIn.readLine();
+            rawOut.write(fragmentData);
+            rawOut.flush();
 
-            if (readyLine == null || !readyLine.contains("\"type\":\"READY\"")) {
-                System.err.println("Slave pas prêt : " + readyLine);
-                return;
+            System.out.println("  ✅ Données envoyées : " + fragmentData.length + " bytes");
+
+            String ackLine = readJsonLine(rawIn);
+
+            if (ackLine == null) {
+                throw new IOException("Slave ne répond pas");
             }
 
-            System.out.println("Slave prêt");
-
-            // 3. Envoyer les données BINAIRES
-            binaryOut.write(fragmentData);
-            binaryOut.flush();
-
-            System.out.println("Donnees envoyees : " + fragmentData.length + " bytes");
-
-            // 4. Attendre ACK du slave
-            String ackLine = textIn.readLine();
             JsonObject ackMsg = gson.fromJson(ackLine, JsonObject.class);
+
+            if (!ackMsg.has("type") || !ackMsg.get("type").getAsString().equals("ACK")) {
+                throw new IOException("Réponse invalide: " + ackLine);
+            }
 
             JsonObject ackData = ackMsg.getAsJsonObject("data");
             String status = ackData.get("status").getAsString();
 
             if (status.equals("OK")) {
-                String checksum = ackData.has("checksum") ?
-                        ackData.get("checksum").getAsString() : "N/A";
-
-                System.out.println("ACK reçu : " + status);
-                System.out.println("Checksum : " + checksum);
-
-                // TODO: Sauvegarder checksum dans métadonnées
-
+                System.out.println("  Fragment stocké avec succès!");
             } else {
-                System.err.println("Erreur slave : " + status);
+                System.err.println("  Erreur slave : " + status);
+                throw new IOException("Slave a refusé le fragment: " + status);
             }
 
         } catch (Exception e) {
-            System.err.println("Erreur connexion slave : " + e.getMessage());
+            System.err.println(" Erreur connexion slave : " + e.getMessage());
             throw new IOException("Echec envoi fragment au slave", e);
         }
     }
+    
+
 
 
     public static void registerSlave(Socket client, String line) throws IOException {
-        String slaveId = line.split("\"slave_id\":\"")[1].split("\"")[0];
-        String capacityStr = line.split("\"capacity\":")[1].split("}")[0];
-        long capacity = Long.parseLong(capacityStr);
-        int id = Integer.parseInt(slaveId);
-        SlaveInfo slaveInfo = new SlaveInfo(id, capacity);
-        //verification raha efa ao le slave
-        for (SlaveInfo s : slaves) {
-            if (s.getId() == id) {
-                System.out.println("Slave deja enregistre: " + id);
-                System.out.println("le meilleur slave est : " + getBestCapacityFromSlave());
+        try {
+            JsonObject msg = gson.fromJson(line, JsonObject.class);
+            JsonObject data = msg.getAsJsonObject("data");
 
-                return;
+            int id = Integer.parseInt(data.get("slave_id").getAsString());
+            long capacity = data.get("capacity").getAsLong();
+            int port = data.get("port").getAsInt();
+            String host_str = client.getInetAddress().getHostAddress();
+
+            SlaveInfo slaveInfo = new SlaveInfo(id, capacity, port,host_str);
+            for (SlaveInfo s : slaves) {
+                if (s.getId() == id) {
+                    System.out.println("Slave deja enregistre: " + id + " - envoi PING");
+                    return;
+                }
             }
-        }
-        writeToFile(slaveInfo);
-        slaves.add(slaveInfo);
+            slaves.add(slaveInfo);
+            writeToFile(slaveInfo);
+            System.out.println("Nouveau slave enregistre: " + id);
 
+        } catch (Exception e) {
+            System.err.println(" Erreur parsing REGISTER: " + e.getMessage());
+        }
     }
 
     public static void writeToFile(SlaveInfo slaveInfo) throws IOException {
         String path = "logs/slave.txt";
         try (BufferedWriter bw = new BufferedWriter(new FileWriter(path, true))) {
-            String line = slaveInfo.getId() + ";;" + slaveInfo.getCapacity();
+            String line = slaveInfo.getId() + "," + slaveInfo.getCapacity() + "," + slaveInfo.getPort() + "," + slaveInfo.getHost();
             bw.write(line);
             bw.newLine();
         } catch (IOException e) {
@@ -241,12 +305,15 @@ public class MainServer {
             while ((line = bf.readLine()) != null) {
                 line = line.trim();
                 if (line.isEmpty()) continue;
-                String[] parts = line.split(";;");
+                String[] parts = line.split(",");
                 String str_id = parts[0];
                 String str_capacity = parts[1];
+                String str_port = parts[2];
+                String str_ip = parts[3];
                 int id = Integer.parseInt(str_id);
                 long capacity = Long.parseLong(str_capacity);
-                SlaveInfo slaveInfo = new SlaveInfo(id, capacity);
+                int port = Integer.parseInt(str_port);
+                SlaveInfo slaveInfo = new SlaveInfo(id, capacity,port,str_ip);
                 slaves.add(slaveInfo);
             }
         } catch (IOException e) {
@@ -255,13 +322,9 @@ public class MainServer {
     }
 
 
-
-
-
     //mbola essaie fotsiny fa tsy optimal
     public static int getBestCapacityFromSlave() {
         if (slaves.isEmpty()) return -1;
-
         SlaveInfo best = slaves.get(0);
         for (SlaveInfo s : slaves) {
             if (s.getCapacity() > best.getCapacity()) {
@@ -276,6 +339,19 @@ public class MainServer {
             if (s.getId() == id) return s;
         }
         return null;
+    }
+
+    public static void ListenPingPong() throws InterruptedException {
+        try{
+            while (true) {
+                //maijery hoe mbola velon asa tsia
+                sleep(10000);
+                sendPing();
+            }
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+
     }
 
 

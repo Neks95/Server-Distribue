@@ -51,7 +51,7 @@ public class Slave {
         }
 
         try (ServerSocket serverSocket = new ServerSocket(listenPort)) {
-            System.out.println("Slave écoute sur le port " + listenPort);
+            System.out.println("Slave ecoute sur le port " + listenPort);
             while (true) {
                 Socket client = serverSocket.accept();
                 pool.submit(() -> handleClient(client));
@@ -66,12 +66,9 @@ public class Slave {
     private void registerWithMaster() {
         try (Socket s = new Socket(masterHost, masterPort);
              PrintWriter out = new PrintWriter(new OutputStreamWriter(s.getOutputStream(), StandardCharsets.UTF_8), true)) {
-
-            String host = InetAddress.getLocalHost().getHostAddress();
             JsonObject data = new JsonObject();
             data.addProperty("slave_id", slaveId);
             data.addProperty("capacity", getFreeSpace());
-            data.addProperty("host", host);
             data.addProperty("port", listenPort);
 
             JsonObject msg = new JsonObject();
@@ -79,7 +76,7 @@ public class Slave {
             msg.add("data", data);
             out.println(gson.toJson(msg));
             out.flush();
-            System.out.println("REGISTER envoyé au master: " + msg.toString());
+            System.out.println("REGISTER envoye au master: " + msg.toString());
         } catch (Exception e) {
             System.err.println("registerWithMaster échoué: " + e.getMessage());
         }
@@ -116,6 +113,7 @@ public class Slave {
                     handleGetFragment(out, data);
                     break;
                 case "PING":
+                    System.out.println("PING RECU");
                     sendJson(out, pong());
                     break;
                 default:
@@ -232,28 +230,34 @@ public class Slave {
     }
 
     private void sendJson(OutputStream out, JsonObject msg) throws IOException {
+        System.out.println("PONG ENVOYE");
         sendJsonRaw(out, msg);
     }
 
     private JsonObject ackOk(int fragmentId) {
-        JsonObject d = new JsonObject();
-        d.addProperty("fragment_id", fragmentId);
-        d.addProperty("status", "OK");
-        JsonObject m = new JsonObject();
-        m.addProperty("type", "ACK");
-        m.add("data", d);
-        return m.getAsJsonObject("data") == null ? d : d; 
+        JsonObject data = new JsonObject();
+        data.addProperty("fragment_id", fragmentId);
+        data.addProperty("status", "OK");
+
+        JsonObject msg = new JsonObject();
+        msg.addProperty("type", "ACK");
+        msg.add("data", data);
+
+        return msg;
     }
 
     private JsonObject ackError(int fragmentId, String message) {
-        JsonObject d = new JsonObject();
-        d.addProperty("fragment_id", fragmentId);
-        d.addProperty("status", "ERROR: " + message);
-        JsonObject wrapper = new JsonObject();
-        wrapper.addProperty("type", "ACK");
-        wrapper.add("data", d);
-        return d;
+        JsonObject data = new JsonObject();
+        data.addProperty("fragment_id", fragmentId);
+        data.addProperty("status", "ERROR: " + message);
+
+        JsonObject msg = new JsonObject();
+        msg.addProperty("type", "ACK");
+        msg.add("data", data);
+
+        return msg;
     }
+
 
     private JsonObject pong() {
         JsonObject d = new JsonObject();
@@ -298,10 +302,6 @@ public class Slave {
 
     // MAIN
     public static void main(String[] args) {
-        if (args.length < 5) {
-            System.err.println("Usage: java slaves.Slave <slaveId> <masterHost> <masterPort> <listenPort> [storageDir]");
-            System.exit(1);
-        }
         try {
             String slaveId = args[0];
             String masterHost = args[1];
