@@ -267,8 +267,8 @@ public class Slave {
         }
         
         String nomFichier = fileId + "_fragment_" + fragmentId + ".dat";
-        String cheminTemp = storageDir + "/" + nomFichier + ".tmp";
-        String cheminFinal = storageDir + "/" + nomFichier;
+        String cheminTemp = Paths.get(storageDir, nomFichier + ".tmp").toString();
+        String cheminFinal = Paths.get(storageDir, nomFichier).toString();
         
        
         MessageDigest digest = null;
