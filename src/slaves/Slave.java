@@ -1,303 +1,625 @@
 package slaves;
 
-import com.google.gson.Gson;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonSyntaxException;
-
+import com.google.gson.*;
 import java.io.*;
-import java.net.InetAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
-import java.nio.charset.StandardCharsets;
+import java.net.*;
 import java.nio.file.*;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.security.*;
+import java.util.*;
+import java.util.concurrent.*;
 
-
+/**
+ * Slave - Système de stockage distribué 
+ * 
+ * Ce que fait ce programme:
+ * 1. Ecoute sur un port (ServerSocket) pour recevoir des commandes du Master
+ * 2. Stocke des fragments de fichiers (STORE_FRAGMENT)
+ * 3. Renvoie des fragments (GET_FRAGMENT)
+ * 4. Envoie régulièrement un heartbeat au Master (STATUS)
+ * 5. Vérifie les checksums (SHA-256) si fournis
+ * 6. Sauvegarde un index des fragments dans index.json
+ * 
+ * Usage:
+ *   java -cp out:libs/gson-2.8.9.jar slaves.Slave ryan-01 localhost 8080 9001 ./slave_storage
+ */
 public class Slave {
 
-    private final String slaveId;
-    private final String masterHost;
-    private final int masterPort;
-    private final int listenPort;
-    private final Path storageDir;
-    private final Set<String> fragmentIndex = ConcurrentHashMap.newKeySet();
-    private final Gson gson = new Gson();
-    private final ExecutorService pool = Executors.newFixedThreadPool(8);
+    
+    
+    private String slaveId;              
+    private String masterHost;           
+    private int masterPort;         
+    private int listenPort;              
+    private String storageDir;          
+    
+    private Gson gson;                   
+    private boolean running;         
+    
+  
+    private ExecutorService threadPool;
+    private ScheduledExecutorService heartbeatTimer;
+    
 
-    public Slave(String slaveId, String masterHost, int masterPort, int listenPort, String storageDirPath) throws IOException {
+    private Map<String, Map<String, Object>> index;
+
+    private static final long MAX_FRAGMENT_SIZE = 500L * 1024L * 1024L; // 500 MB max
+    private static final long MIN_FREE_SPACE = 100L * 1024L * 1024L;     // 100 MB minimum à garder
+
+    
+    public Slave(String slaveId, String masterHost, int masterPort, int listenPort, String storageDir) {
         this.slaveId = slaveId;
         this.masterHost = masterHost;
         this.masterPort = masterPort;
         this.listenPort = listenPort;
-        this.storageDir = Paths.get(storageDirPath == null ? "./slave_storage" : storageDirPath);
-        Files.createDirectories(this.storageDir);
-        loadIndexFromStorage();
-    }
+        this.storageDir = storageDir;
+        
+        this.gson = new Gson();
+        this.running = true;
+        this.index = new ConcurrentHashMap<>(); 
+        
 
-    private void loadIndexFromStorage() throws IOException {
-        try (DirectoryStream<Path> ds = Files.newDirectoryStream(storageDir, "*_fragment_*.dat")) {
-            for (Path p : ds) fragmentIndex.add(p.getFileName().toString());
-        }
-    }
-
-    public void start() {
+        this.threadPool = Executors.newFixedThreadPool(8);
+        
+    
+        this.heartbeatTimer = Executors.newScheduledThreadPool(1);
+        
+ 
         try {
-            registerWithMaster();
+            Files.createDirectories(Paths.get(storageDir));
+            afficher("Dossier de stockage créé/vérifié: " + storageDir);
         } catch (Exception e) {
-            System.err.println("Impossible d'enregistrer auprès du master: " + e.getMessage());
+            afficherErreur("Impossible de créer le dossier: " + e.getMessage());
         }
+        
+     
+        nettoyerFichiersTemp();
+        
+      
+        chargerIndex();
+    }
 
-        try (ServerSocket serverSocket = new ServerSocket(listenPort)) {
-            System.out.println("Slave ecoute sur le port " + listenPort);
-            while (true) {
-                Socket client = serverSocket.accept();
-                pool.submit(() -> handleClient(client));
+
+    
+    public void demarrer() {
+        afficher("Démarrage du slave " + slaveId + "...");
+        
+
+        enregistrerAuprèsDuMaster();
+        
+     
+        heartbeatTimer.scheduleAtFixedRate(new Runnable() {
+            public void run() {
+                envoyerHeartbeat();
             }
-        } catch (IOException e) {
-            throw new RuntimeException("Erreur ServerSocket: " + e.getMessage(), e);
+        }, 10, 10, TimeUnit.SECONDS);
+        
+     
+        try {
+            ServerSocket serverSocket = new ServerSocket(listenPort);
+            afficher("Slave écoute sur le port " + listenPort);
+            
+           
+            while (running) {
+                try {
+                    Socket clientSocket = serverSocket.accept();
+                    
+                
+                    threadPool.submit(new Runnable() {
+                        public void run() {
+                            traiterConnexion(clientSocket);
+                        }
+                    });
+                } catch (Exception e) {
+                    if (running) {
+                        afficherErreur("Erreur accept: " + e.getMessage());
+                    }
+                }
+            }
+            
+            serverSocket.close();
+        } catch (Exception e) {
+            afficherErreur("Erreur ServerSocket: " + e.getMessage());
         } finally {
-            pool.shutdown();
+            arreter();
         }
     }
 
-    private void registerWithMaster() {
-        try (Socket s = new Socket(masterHost, masterPort);
-             PrintWriter out = new PrintWriter(new OutputStreamWriter(s.getOutputStream(), StandardCharsets.UTF_8), true)) {
-            JsonObject data = new JsonObject();
-            data.addProperty("slave_id", slaveId);
-            data.addProperty("capacity", getFreeSpace());
-            data.addProperty("port", listenPort);
+ 
+    
+    public void arreter() {
+        afficher("Arrêt du slave...");
+        running = false;
+        
+     
+        heartbeatTimer.shutdownNow();
+        threadPool.shutdown();
+        
+       
+        sauvegarderIndex();
+        
+        afficher("Slave arrêté.");
+    }
 
-            JsonObject msg = new JsonObject();
-            msg.addProperty("type", "REGISTER");
-            msg.add("data", data);
-            out.println(gson.toJson(msg));
+    // ========== ENREGISTREMENT AU MASTER ==========
+    
+    private void enregistrerAuprèsDuMaster() {
+        try {
+     
+            Socket socket = new Socket(masterHost, masterPort);
+            PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
+            
+
+            String host = InetAddress.getLocalHost().getHostAddress();
+  
+            String json = "{\"type\":\"REGISTER\",\"data\":{" +
+                          "\"slave_id\":\"" + slaveId + "\"," +
+                          "\"capacity\":" + obtenirEspaceLibre() + "," +
+                          "\"host\":\"" + host + "\"," +
+                          "\"port\":" + listenPort +
+                          "}}";
+            
+            
+            out.println(json);
             out.flush();
-            System.out.println("REGISTER envoye au master: " + msg.toString());
+            
+            afficher("REGISTER envoyé au master (host=" + host + ", port=" + listenPort + ")");
+            
+
+            out.close();
+            socket.close();
         } catch (Exception e) {
-            System.err.println("registerWithMaster échoué: " + e.getMessage());
+            afficherErreur("Impossible de s'enregistrer au master: " + e.getMessage());
         }
     }
 
-    private void handleClient(Socket socket) {
+     private void envoyerHeartbeat() {
+        try {
+            Socket socket = new Socket(masterHost, masterPort);
+            PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
+            
+            String json = "{\"type\":\"STATUS\",\"data\":{" +
+                          "\"slave_id\":\"" + slaveId + "\"," +
+                          "\"free_space\":" + obtenirEspaceLibre() + "," +
+                          "\"fragments_count\":" + index.size() + "," +
+                          "\"timestamp\":" + System.currentTimeMillis() +
+                          "}}";
+            
+            out.println(json);
+            out.flush();
+            
+            afficher("STATUS envoyé (fragments: " + index.size() + ", espace: " + obtenirEspaceLibre() + ")");
+            
+            out.close();
+            socket.close();
+        } catch (Exception e) {
+            
+        }
+    }
+
+   
+    
+    private void traiterConnexion(Socket socket) {
         String remote = socket.getRemoteSocketAddress().toString();
-        System.out.println("Connexion entrante de " + remote);
-        try (InputStream in = socket.getInputStream();
-             OutputStream out = socket.getOutputStream()) {
-
-            String line = readJsonLine(in);
-            if (line == null) {
-                System.err.println("Aucune donnée JSON reçue de " + remote);
+        afficher("Connexion entrante de " + remote);
+        
+        try {
+            
+            socket.setSoTimeout(60000);
+            
+            InputStream in = socket.getInputStream();
+            OutputStream out = socket.getOutputStream();
+            
+        
+            String ligne = lireLigneJSON(in);
+            
+            if (ligne == null || ligne.isEmpty()) {
+                afficherErreur("Aucune donnée reçue de " + remote);
+                socket.close();
                 return;
             }
-
-            JsonObject msg;
-            try {
-                msg = gson.fromJson(line, JsonObject.class);
-            } catch (JsonSyntaxException ex) {
-                sendJson(out, error("invalid_json", "JSON non valide"));
-                return;
+            
+     
+            JsonObject message = gson.fromJson(ligne, JsonObject.class);
+            String type = message.get("type").getAsString();
+            JsonObject data = message.has("data") ? message.getAsJsonObject("data") : null;
+            
+            afficher("Commande reçue: " + type);
+            
+            
+            if (type.equals("STORE_FRAGMENT")) {
+                stockerFragment(in, out, data);
+            } else if (type.equals("GET_FRAGMENT")) {
+                envoyerFragment(out, data);
+            } else if (type.equals("PING")) {
+                repondrePong(out);
+            } else if (type.equals("DELETE_FRAGMENT")) {
+                supprimerFragment(out, data);
+            } else {
+                envoyerErreur(out, "unsupported", "Type non supporté: " + type);
             }
-
-            String type = msg.has("type") ? msg.get("type").getAsString() : "";
-            JsonObject data = msg.has("data") ? msg.getAsJsonObject("data") : null;
-
-            switch (type) {
-                case "STORE_FRAGMENT":
-                    handleStoreFragment(in, out, data);
-                    break;
-                case "GET_FRAGMENT":
-                    handleGetFragment(out, data);
-                    break;
-                case "PING":
-                    System.out.println("PING RECU");
-                    sendJson(out, pong());
-                    break;
-                default:
-                    sendJson(out, error("unsupported", "Type non supporté: " + type));
-            }
+            
+            out.flush();
+            socket.close();
         } catch (Exception e) {
-            System.err.println("Erreur sur connexion " + remote + " : " + e.getMessage());
+            afficherErreur("Erreur traitement connexion " + remote + ": " + e.getMessage());
+            try { socket.close(); } catch (Exception ignored) {}
         }
     }
 
-    private String readJsonLine(InputStream in) throws IOException {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        
+    private String lireLigneJSON(InputStream in) throws Exception {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         int b;
+        
+       
         while ((b = in.read()) != -1) {
-            if (b == '\n') break;
-            baos.write(b);
-            if (baos.size() > 10_000) { // 10KB header limit
-                throw new IOException("Ligne JSON trop longue");
+            if (b == '\n') break; 
+            buffer.write(b);
+         
+            if (buffer.size() > 10000) {
+                throw new Exception("Ligne JSON trop longue");
             }
         }
-        if (baos.size() == 0 && b == -1) return null;
-        return baos.toString(StandardCharsets.UTF_8.name()).trim();
+        
+        if (buffer.size() == 0 && b == -1) return null;
+        
+        return buffer.toString("UTF-8").trim();
     }
 
-    private void handleStoreFragment(InputStream in, OutputStream out, JsonObject data) throws IOException {
-        if (data == null || !data.has("file_id") || !data.has("fragment_id") || !data.has("length")) {
-            sendJson(out, ackError(-1, "missing fields"));
+    
+    private void stockerFragment(InputStream in, OutputStream out, JsonObject data) throws Exception {
+    
+        if (!data.has("file_id") || !data.has("fragment_id") || !data.has("length")) {
+            envoyerACK(out, -1, "ERROR: champs manquants");
             return;
         }
-        String fileId = sanitizeFileId(data.get("file_id").getAsString());
+        
+        String fileId = nettoyerNom(data.get("file_id").getAsString());
         int fragmentId = data.get("fragment_id").getAsInt();
-        long length = data.get("length").getAsLong();
+        long taille = data.get("length").getAsLong();
+        String checksumAttendu = data.has("checksum") ? data.get("checksum").getAsString() : null;
+        
+        afficher("STORE_FRAGMENT: fileId=" + fileId + ", fragmentId=" + fragmentId + ", taille=" + taille);
+        
 
-        if (length < 0 || length > 500L * 1024L * 1024L) { // limit 500MB example
-            sendJson(out, ackError(fragmentId, "invalid length"));
+        if (taille < 0 || taille > MAX_FRAGMENT_SIZE) {
+            envoyerACK(out, fragmentId, "ERROR: taille invalide");
             return;
         }
+        
 
-        String filename = fileId + "_fragment_" + fragmentId + ".dat";
-        Path tmp = storageDir.resolve(filename + ".tmp");
-        Path dest = storageDir.resolve(filename);
+        if (obtenirEspaceLibre() < MIN_FREE_SPACE + taille) {
+            envoyerACK(out, fragmentId, "ERROR: espace disque insuffisant");
+            return;
+        }
+        
 
-        try (OutputStream fos = Files.newOutputStream(tmp, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
-            long remaining = length;
-            byte[] buffer = new byte[8192];
-            while (remaining > 0) {
-                int toRead = (int) Math.min(buffer.length, remaining);
-                int read = in.read(buffer, 0, toRead);
-                if (read == -1) throw new EOFException("Flux terminé prématurément");
-                fos.write(buffer, 0, read);
-                remaining -= read;
+        String nomFichier = fileId + "_fragment_" + fragmentId + ".dat";
+        String cheminTemp = storageDir + "/" + nomFichier + ".tmp";
+        String cheminFinal = storageDir + "/" + nomFichier;
+        
+
+        MessageDigest digest = null;
+        if (checksumAttendu != null) {
+            try {
+                digest = MessageDigest.getInstance("SHA-256");
+            } catch (Exception e) {
+                afficherErreur("SHA-256 non disponible: " + e.getMessage());
             }
-            fos.flush();
-        } catch (IOException e) {
-            try { Files.deleteIfExists(tmp); } catch (IOException ignored) {}
-            sendJson(out, ackError(fragmentId, "io_error: " + e.getMessage()));
-            return;
         }
+        
 
         try {
-            Files.move(tmp, dest, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-            fragmentIndex.add(dest.getFileName().toString());
-            sendJson(out, ackOk(fragmentId));
-            System.out.println("Fragment stocké: " + dest + " (" + length + " bytes)");
-        } catch (IOException e) {
-            sendJson(out, ackError(fragmentId, "move_error: " + e.getMessage()));
-        }
-    }
+            FileOutputStream fos = new FileOutputStream(cheminTemp);
+            byte[] buffer = new byte[8192]; 
+            long restant = taille;
+            
+            while (restant > 0) {
+       
+                int aLire = (int) Math.min(buffer.length, restant);
+                int lu = in.read(buffer, 0, aLire);
+                
+                if (lu == -1) {
+                    fos.close();
+                    new File(cheminTemp).delete();
+                    throw new Exception("Connexion coupée pendant le transfert");
+                }
 
-    private void handleGetFragment(OutputStream out, JsonObject data) throws IOException {
-        if (data == null || !data.has("file_id") || !data.has("fragment_id")) {
-            sendJson(out, error("missing_fields", "file_id or fragment_id missing"));
-            return;
-        }
-        String fileId = sanitizeFileId(data.get("file_id").getAsString());
-        int fragmentId = data.get("fragment_id").getAsInt();
-        String filename = fileId + "_fragment_" + fragmentId + ".dat";
-        Path f = storageDir.resolve(filename);
-        if (!Files.exists(f)) {
-            sendJson(out, error("not_found", "fragment not found"));
-            return;
-        }
-
-        long length = Files.size(f);
-        JsonObject resp = new JsonObject();
-        resp.addProperty("file_id", fileId);
-        resp.addProperty("fragment_id", fragmentId);
-        resp.addProperty("length", length);
-
-        sendJsonRaw(out, "GET_FRAGMENT_RESPONSE", resp);
-
-        try (InputStream fis = Files.newInputStream(f, StandardOpenOption.READ)) {
-            byte[] buffer = new byte[8192];
-            int r;
-            while ((r = fis.read(buffer)) != -1) {
-                out.write(buffer, 0, r);
+                fos.write(buffer, 0, lu);
+                
+   
+                if (digest != null) {
+                    digest.update(buffer, 0, lu);
+                }
+                
+                restant -= lu;
             }
-            out.flush();
+            
+            fos.flush();
+            fos.close();
+            
+        } catch (Exception e) {
+            new File(cheminTemp).delete();
+            envoyerACK(out, fragmentId, "ERROR: " + e.getMessage());
+            return;
         }
-        System.out.println("Fragment envoyé: " + f + " (" + length + " bytes)");
+        
+
+        if (digest != null && checksumAttendu != null) {
+            String checksumCalculé = bytesToHex(digest.digest());
+            
+            if (!checksumCalculé.equalsIgnoreCase(checksumAttendu)) {
+                new File(cheminTemp).delete();
+                envoyerACK(out, fragmentId, "ERROR: checksum incorrect");
+                afficherErreur("Checksum mismatch: attendu=" + checksumAttendu + ", reçu=" + checksumCalculé);
+                return;
+            }
+        }
+        
+    
+        File temp = new File(cheminTemp);
+        File dest = new File(cheminFinal);
+        
+        if (dest.exists()) dest.delete();
+        boolean renomme = temp.renameTo(dest);
+        
+        if (!renomme) {
+            temp.delete();
+            envoyerACK(out, fragmentId, "ERROR: impossible de renommer le fichier");
+            return;
+        }
+        
+
+        Map<String, Object> meta = new HashMap<>();
+        meta.put("fileId", fileId);
+        meta.put("fragmentId", fragmentId);
+        meta.put("taille", taille);
+        meta.put("checksum", checksumAttendu);
+        index.put(nomFichier, meta);
+        
+
+        sauvegarderIndex();
+        
+
+        envoyerACK(out, fragmentId, "OK");
+        afficher("Fragment stocké: " + nomFichier + " (" + taille + " bytes)");
     }
 
-    private void sendJsonRaw(OutputStream out, String type, JsonObject data) throws IOException {
-        JsonObject msg = new JsonObject();
-        msg.addProperty("type", type);
-        msg.add("data", data);
-        sendJsonRaw(out, msg);
+
+    
+    private void envoyerFragment(OutputStream out, JsonObject data) throws Exception {
+        if (!data.has("file_id") || !data.has("fragment_id")) {
+            envoyerErreur(out, "missing_fields", "file_id ou fragment_id manquant");
+            return;
+        }
+        
+        String fileId = nettoyerNom(data.get("file_id").getAsString());
+        int fragmentId = data.get("fragment_id").getAsInt();
+        String nomFichier = fileId + "_fragment_" + fragmentId + ".dat";
+        String chemin = storageDir + "/" + nomFichier;
+        
+        File fichier = new File(chemin);
+        
+        if (!fichier.exists()) {
+            envoyerErreur(out, "not_found", "Fragment non trouvé");
+            return;
+        }
+        
+        long taille = fichier.length();
+        
+       
+        String checksum = null;
+        if (index.containsKey(nomFichier)) {
+            Map<String, Object> meta = index.get(nomFichier);
+            checksum = (String) meta.get("checksum");
+        }
+        
+
+        String json = "{\"type\":\"GET_FRAGMENT_RESPONSE\",\"data\":{" +
+                      "\"file_id\":\"" + fileId + "\"," +
+                      "\"fragment_id\":" + fragmentId + "," +
+                      "\"length\":" + taille;
+        if (checksum != null) {
+            json += ",\"checksum\":\"" + checksum + "\"";
+        }
+        json += "}}";
+        
+        out.write((json + "\n").getBytes("UTF-8"));
+        out.flush();
+        
+      
+        FileInputStream fis = new FileInputStream(fichier);
+        byte[] buffer = new byte[8192];
+        int lu;
+        
+        while ((lu = fis.read(buffer)) != -1) {
+            out.write(buffer, 0, lu);
+        }
+        
+        out.flush();
+        fis.close();
+        
+        afficher("Fragment envoyé: " + nomFichier + " (" + taille + " bytes)");
     }
 
-    private void sendJsonRaw(OutputStream out, JsonObject msg) throws IOException {
-        byte[] bytes = (gson.toJson(msg) + "\n").getBytes(StandardCharsets.UTF_8);
-        out.write(bytes);
+    // ========== DELETE_FRAGMENT ==========
+    
+    private void supprimerFragment(OutputStream out, JsonObject data) throws Exception {
+        if (!data.has("file_id") || !data.has("fragment_id")) {
+            envoyerErreur(out, "missing_fields", "file_id ou fragment_id manquant");
+            return;
+        }
+        
+        String fileId = nettoyerNom(data.get("file_id").getAsString());
+        int fragmentId = data.get("fragment_id").getAsInt();
+        String nomFichier = fileId + "_fragment_" + fragmentId + ".dat";
+        String chemin = storageDir + "/" + nomFichier;
+        
+        File fichier = new File(chemin);
+        boolean supprime = fichier.delete();
+        
+        if (supprime) {
+            index.remove(nomFichier);
+            sauvegarderIndex();
+            
+            String json = "{\"type\":\"DELETE_ACK\",\"data\":{\"status\":\"OK\"}}";
+            out.write((json + "\n").getBytes("UTF-8"));
+            afficher("Fragment supprimé: " + nomFichier);
+        } else {
+            envoyerErreur(out, "delete_error", "Impossible de supprimer le fichier");
+        }
+    }
+
+
+    
+    private void repondrePong(OutputStream out) throws Exception {
+        String json = "{\"type\":\"PONG\",\"data\":{\"slave_id\":\"" + slaveId + "\"}}";
+        out.write((json + "\n").getBytes("UTF-8"));
+        afficher("PONG envoyé");
+    }
+
+
+    
+    private void envoyerACK(OutputStream out, int fragmentId, String status) throws Exception {
+        String json = "{\"type\":\"ACK\",\"data\":{" +
+                      "\"fragment_id\":" + fragmentId + "," +
+                      "\"status\":\"" + status + "\"}}";
+        out.write((json + "\n").getBytes("UTF-8"));
         out.flush();
     }
 
-    private void sendJson(OutputStream out, JsonObject msg) throws IOException {
-        System.out.println("PONG ENVOYE");
-        sendJsonRaw(out, msg);
+   
+    private void envoyerErreur(OutputStream out, String code, String message) throws Exception {
+        String json = "{\"type\":\"ERROR\",\"data\":{" +
+                      "\"code\":\"" + code + "\"," +
+                      "\"message\":\"" + message + "\"}}";
+        out.write((json + "\n").getBytes("UTF-8"));
+        out.flush();
     }
 
-    private JsonObject ackOk(int fragmentId) {
-        JsonObject data = new JsonObject();
-        data.addProperty("fragment_id", fragmentId);
-        data.addProperty("status", "OK");
-
-        JsonObject msg = new JsonObject();
-        msg.addProperty("type", "ACK");
-        msg.add("data", data);
-
-        return msg;
-    }
-
-    private JsonObject ackError(int fragmentId, String message) {
-        JsonObject data = new JsonObject();
-        data.addProperty("fragment_id", fragmentId);
-        data.addProperty("status", "ERROR: " + message);
-
-        JsonObject msg = new JsonObject();
-        msg.addProperty("type", "ACK");
-        msg.add("data", data);
-
-        return msg;
-    }
-
-
-    private JsonObject pong() {
-        JsonObject d = new JsonObject();
-        d.addProperty("slave_id", slaveId);
-        JsonObject m = new JsonObject();
-        m.addProperty("type", "PONG");
-        m.add("data", d);
-        return m;
-    }
-
-    private JsonObject error(String code, String message) {
-        JsonObject d = new JsonObject();
-        d.addProperty("code", code);
-        d.addProperty("message", message);
-        JsonObject m = new JsonObject();
-        m.addProperty("type", "ERROR");
-        m.add("data", d);
-        return m;
-    }
-
-    private void sendAckWrapper(OutputStream out, int fragmentId, String status) throws IOException {
-        JsonObject d = new JsonObject();
-        d.addProperty("fragment_id", fragmentId);
-        d.addProperty("status", status);
-        JsonObject msg = new JsonObject();
-        msg.addProperty("type", "ACK");
-        msg.add("data", d);
-        sendJson(out, msg);
-    }
-
-    private String sanitizeFileId(String fileId) {
-        return fileId.replaceAll("[^A-Za-z0-9._-]", "_");
-    }
-
-    private long getFreeSpace() {
+ 
+    
+    private void chargerIndex() {
+        String cheminIndex = storageDir + "/index.json";
+        File fichierIndex = new File(cheminIndex);
+        
+        if (!fichierIndex.exists()) {
+            afficher("Aucun index existant, création d'un nouvel index");
+            return;
+        }
+        
         try {
-            return Files.getFileStore(storageDir).getUsableSpace();
-        } catch (IOException e) {
-            return -1;
+            FileReader reader = new FileReader(fichierIndex);
+            JsonObject json = gson.fromJson(reader, JsonObject.class);
+            reader.close();
+            
+  
+            for (String cle : json.keySet()) {
+                JsonObject obj = json.getAsJsonObject(cle);
+                Map<String, Object> meta = new HashMap<>();
+                meta.put("fileId", obj.get("fileId").getAsString());
+                meta.put("fragmentId", obj.get("fragmentId").getAsInt());
+                meta.put("taille", obj.get("taille").getAsLong());
+                if (obj.has("checksum") && !obj.get("checksum").isJsonNull()) {
+                    meta.put("checksum", obj.get("checksum").getAsString());
+                }
+                index.put(cle, meta);
+            }
+            
+            afficher("Index chargé: " + index.size() + " fragments");
+        } catch (Exception e) {
+            afficherErreur("Erreur chargement index: " + e.getMessage());
+        }
+    }
+    
+    private void sauvegarderIndex() {
+        String cheminIndex = storageDir + "/index.json";
+        
+        try {
+            FileWriter writer = new FileWriter(cheminIndex);
+            gson.toJson(index, writer);
+            writer.flush();
+            writer.close();
+        } catch (Exception e) {
+            afficherErreur("Erreur sauvegarde index: " + e.getMessage());
         }
     }
 
+    
+    private void nettoyerFichiersTemp() {
+        File dossier = new File(storageDir);
+        File[] fichiers = dossier.listFiles();
+        
+        if (fichiers == null) return;
+        
+        for (File f : fichiers) {
+            if (f.getName().endsWith(".tmp")) {
+                f.delete();
+                afficher("Fichier temporaire supprimé: " + f.getName());
+            }
+        }
+    }
+
+
+    
+
+    private String nettoyerNom(String nom) {
+        return nom.replaceAll("[^A-Za-z0-9._-]", "_");
+    }
+    
+
+    private long obtenirEspaceLibre() {
+        try {
+            File f = new File(storageDir);
+            return f.getUsableSpace();
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+    
+
+    private String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : bytes) {
+            sb.append(String.format("%02x", b));
+        }
+        return sb.toString();
+    }
+   
+    private void afficher(String message) {
+        System.out.println("[" + slaveId + "] " + message);
+    }
+    
+    private void afficherErreur(String message) {
+        System.err.println("[" + slaveId + "] ERREUR: " + message);
+    }
+
+    // ========== MAIN  ==========
+    
+    public static void main(String[] args) {
+        if (args.length < 4) {
+            System.err.println("Usage: java slaves.Slave <slaveId> <masterHost> <masterPort> <listenPort> [storageDir]");
+            System.exit(1);
+        }
+        
+        String slaveId = args[0];
+        String masterHost = args[1];
+        int masterPort = Integer.parseInt(args[2]);
+        int listenPort = Integer.parseInt(args[3]);
+        String storageDir = args.length >= 5 ? args[4] : "./slave_storage";
+        
+        try {
+            Slave slave = new Slave(slaveId, masterHost, masterPort, listenPort, storageDir);
+            
+            Runtime.getRuntime().addShutdownHook(new Thread() {
+                public void run() {
+                    slave.arreter();
+                }
+            });
+            
+            slave.demarrer();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
 }
