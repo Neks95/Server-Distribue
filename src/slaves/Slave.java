@@ -526,7 +526,12 @@ public class Slave {
 
     
     private String nettoyerNom(String nom) {
-        return nom.replaceAll("[^A-Za-z0-9._-]", "_");
+        String nettoye = nom.replaceAll("[^A-Za-z0-9._-]", "_");
+        // Prevent directory traversal by rejecting any remaining ".." sequences
+        if (nettoye.contains("..")) {
+            throw new IllegalArgumentException("Nom de fichier invalide: séquence '..' non autorisée");
+        }
+        return nettoye;
     }
     
     private long obtenirEspaceLibre() {
