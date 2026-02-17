@@ -8,24 +8,7 @@ import java.security.*;
 import java.util.*;
 import java.util.concurrent.*;
 
-/**
- * Slave - Système de stockage distribué 
- * 
- * Ce que fait ce programme:
- * 1. Ecoute sur un port (ServerSocket) pour recevoir des commandes du Master
- * 2. Stocke des fragments de fichiers (STORE_FRAGMENT)
- * 3. Renvoie des fragments (GET_FRAGMENT)
- * 4. Envoie régulièrement un heartbeat au Master (STATUS)
- * 5. Vérifie les checksums (SHA-256) si fournis
- * 6. Sauvegarde un index des fragments dans index.json
- * 
- * Usage:
- *   java -cp out:libs/gson-2.8.9.jar slaves.Slave ryan-01 localhost 8080 9001 ./slave_storage
- */
 public class Slave {
-
-    
-    
     private String slaveId;              
     private String masterHost;           
     private int masterPort;         
